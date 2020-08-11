@@ -10,6 +10,8 @@ using Ravi.DurableFunctions.HelloWorld.Dtos;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Runtime.Serialization.Formatters;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -33,23 +35,41 @@ namespace Ravi.DurableFunctions.HelloWorld
             {
                 logger.LogInformation("Invoking TranscodeVideo activity");
             }
-            var transcodedLocation = await context.CallActivityAsync<FormatVideoRequest>("TranscodeVideo", formatVideoRequest);
+
+            //var bitRatesToProcess = new List<int> { 100, 200, 300, 400, 500 };
+
+            var bitRatesToProcess = await context.CallActivityAsync<IEnumerable<int>>("RetrieveBitRates", null);
+            var transCodeVideoTasks = new List<Task<FormatVideoRequest>>();
+            foreach (var item in bitRatesToProcess)
+            {
+                if (!context.IsReplaying)
+                {
+                    logger.LogInformation($"Invoking TranscodeVideo activity for bit rate {item}");
+                }
+                transCodeVideoTasks.Add(context.CallActivityAsync<FormatVideoRequest>("TranscodeVideo",
+                    new FormatVideoRequest { Location = formatVideoRequest.Location, BitRate = item }));
+            }
+
+            var allTasksResult = await Task.WhenAll(transCodeVideoTasks);
+            var extractThumbnailRequest = allTasksResult.OrderByDescending(r => r.BitRate).First();
+
+            //var transcodedLocation = await context.CallActivityAsync<FormatVideoRequest>("TranscodeVideo", formatVideoRequest);
 
             if (!context.IsReplaying)
             {
                 logger.LogInformation("Invoking thumbnail extract activity");
             }
-            var thumbnailLocation = await context.CallActivityAsync<FormatVideoRequest>("ExtractThumbnail", transcodedLocation);
+            var thumbnailLocation = await context.CallActivityAsync<FormatVideoRequest>("ExtractThumbnail", extractThumbnailRequest);
 
             if (!context.IsReplaying)
             {
                 logger.LogInformation("Invoking prepend intro video activity");
             }
-            var withIntroLocation = await context.CallActivityAsync<FormatVideoRequest>("PrependIntro", transcodedLocation);
+            var withIntroLocation = await context.CallActivityAsync<FormatVideoRequest>("PrependIntro", extractThumbnailRequest);
 
-            outputs.Add(transcodedLocation.FileName);
-            outputs.Add(thumbnailLocation.FileName);
-            outputs.Add(withIntroLocation.FileName);
+            outputs.Add(extractThumbnailRequest.Location);
+            outputs.Add(thumbnailLocation.Location);
+            outputs.Add(withIntroLocation.Location);
 
                 return outputs;
         }
@@ -81,7 +101,7 @@ namespace Ravi.DurableFunctions.HelloWorld
                 formatVideoRequest = JsonSerializer.Deserialize<FormatVideoRequest>(bodyAsString, new JsonSerializerOptions {PropertyNameCaseInsensitive = true });
             }
 
-            if ((formatVideoRequest == null) || (string.IsNullOrEmpty(formatVideoRequest.FileName)))
+            if ((formatVideoRequest == null) || (string.IsNullOrEmpty(formatVideoRequest.Location)))
             {
                 return new BadRequestResult();
             }
