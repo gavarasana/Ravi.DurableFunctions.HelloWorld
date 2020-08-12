@@ -11,7 +11,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.Serialization.Formatters;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -24,54 +23,56 @@ namespace Ravi.DurableFunctions.HelloWorld
             [OrchestrationTrigger] IDurableOrchestrationContext context,
             ILogger logger)
         {
-
-            var formatVideoRequest = context.GetInput<FormatVideoRequest>();
             var outputs = new List<string>();
-
-
-            // Replace "hello" with the name of your Durable Activity Function.
-
-            if (!context.IsReplaying)
+            var formatVideoRequest = context.GetInput<FormatVideoRequest>();
+            var approvalResult = "Unknown";
+            try
             {
-                logger.LogInformation("Invoking TranscodeVideo activity");
-            }
 
-            //var bitRatesToProcess = new List<int> { 100, 200, 300, 400, 500 };
 
-            var bitRatesToProcess = await context.CallActivityAsync<IEnumerable<int>>("RetrieveBitRates", null);
-            var transCodeVideoTasks = new List<Task<FormatVideoRequest>>();
-            foreach (var item in bitRatesToProcess)
-            {
+                var allTasksResult = await context.CallSubOrchestratorAsync<IEnumerable<FormatVideoRequest>>("TranscodeVideoOrchestor", formatVideoRequest);
+                var extractThumbnailRequest = allTasksResult.OrderByDescending(r => r.BitRate).First();
+
                 if (!context.IsReplaying)
                 {
-                    logger.LogInformation($"Invoking TranscodeVideo activity for bit rate {item}");
+                    logger.LogInformation("Invoking thumbnail extract activity");
                 }
-                transCodeVideoTasks.Add(context.CallActivityAsync<FormatVideoRequest>("TranscodeVideo",
-                    new FormatVideoRequest { Location = formatVideoRequest.Location, BitRate = item }));
+                var thumbnailLocation = await context.CallActivityAsync<FormatVideoRequest>("ExtractThumbnail", extractThumbnailRequest);
+
+                if (!context.IsReplaying)
+                {
+                    logger.LogInformation("Invoking prepend intro video activity");
+                }
+                var withIntroLocation = await context.CallActivityAsync<FormatVideoRequest>("PrependIntro", extractThumbnailRequest);
+
+
+                await context.CallActivityAsync("SendApprovalRequestEmail", withIntroLocation);
+
+                approvalResult = await context.WaitForExternalEvent<string>("ApprovalResult");
+
+                if (approvalResult == "Approved")
+                {
+                    await context.CallActivityAsync("PublishVideo", withIntroLocation);
+                }
+                else
+                {
+                    await context.CallActivityAsync("RejectVideo", withIntroLocation);
+                }
+
+                outputs.Add(extractThumbnailRequest.Location);
+                outputs.Add(thumbnailLocation.Location);
+                outputs.Add(withIntroLocation.Location);
+                outputs.Add(approvalResult);
+
             }
-
-            var allTasksResult = await Task.WhenAll(transCodeVideoTasks);
-            var extractThumbnailRequest = allTasksResult.OrderByDescending(r => r.BitRate).First();
-
-            //var transcodedLocation = await context.CallActivityAsync<FormatVideoRequest>("TranscodeVideo", formatVideoRequest);
-
-            if (!context.IsReplaying)
+            catch (Exception)
             {
-                logger.LogInformation("Invoking thumbnail extract activity");
+                await context.CallActivityAsync("CleanUp", formatVideoRequest);
+                outputs.Add("Failed");
             }
-            var thumbnailLocation = await context.CallActivityAsync<FormatVideoRequest>("ExtractThumbnail", extractThumbnailRequest);
 
-            if (!context.IsReplaying)
-            {
-                logger.LogInformation("Invoking prepend intro video activity");
-            }
-            var withIntroLocation = await context.CallActivityAsync<FormatVideoRequest>("PrependIntro", extractThumbnailRequest);
+            return outputs;
 
-            outputs.Add(extractThumbnailRequest.Location);
-            outputs.Add(thumbnailLocation.Location);
-            outputs.Add(withIntroLocation.Location);
-
-                return outputs;
         }
 
         [FunctionName("Function1_Hello")]
@@ -87,8 +88,7 @@ namespace Ravi.DurableFunctions.HelloWorld
             [DurableClient] IDurableOrchestrationClient starter,
             ILogger log)
         {
-            // var videoFile = req.Query["FileName"][0];
-            FormatVideoRequest formatVideoRequest ;
+            FormatVideoRequest formatVideoRequest;
             var buffer = new byte[1024];
 
             var dataLength = await req.Body.ReadAsync(buffer);
@@ -98,15 +98,13 @@ namespace Ravi.DurableFunctions.HelloWorld
             {
                 var reader = new StreamReader(memoryStream);
                 var bodyAsString = reader.ReadToEnd();
-                formatVideoRequest = JsonSerializer.Deserialize<FormatVideoRequest>(bodyAsString, new JsonSerializerOptions {PropertyNameCaseInsensitive = true });
+                formatVideoRequest = JsonSerializer.Deserialize<FormatVideoRequest>(bodyAsString, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             }
 
             if ((formatVideoRequest == null) || (string.IsNullOrEmpty(formatVideoRequest.Location)))
             {
                 return new BadRequestResult();
             }
-
-            //var formatVideoRequest = req.Body.Read
 
             // Function input comes from the request content.
             string instanceId = await starter.StartNewAsync("VideoProcessor", formatVideoRequest);
@@ -116,6 +114,33 @@ namespace Ravi.DurableFunctions.HelloWorld
             return starter.CreateCheckStatusResponse(req, instanceId);
         }
 
+        [FunctionName("TranscodeVideoOrchestor")]
+        public static async Task<IEnumerable<FormatVideoRequest>> TranscodeVideoOrchestor(
+            [OrchestrationTrigger] IDurableOrchestrationContext context,
+            ILogger logger)
+        {
+            if (!context.IsReplaying)
+            {
+                logger.LogInformation("Invoking TranscodeVideo activity");
+            }
+
+            var formatVideoRequest = context.GetInput<FormatVideoRequest>();
+
+            var bitRatesToProcess = await context.CallActivityAsync<IEnumerable<int>>("RetrieveBitRates", null);
+            var transCodeVideoTasks = new List<Task<FormatVideoRequest>>();
+
+            foreach (var item in bitRatesToProcess)
+            {
+                if (!context.IsReplaying)
+                {
+                    logger.LogInformation($"Invoking TranscodeVideo activity for bit rate {item}");
+                }
+                transCodeVideoTasks.Add(context.CallActivityAsync<FormatVideoRequest>("TranscodeVideo",
+                    new FormatVideoRequest { Location = formatVideoRequest.Location, BitRate = item }));
+            }
+
+            return await Task.WhenAll(transCodeVideoTasks);
+        }
 
 
     }

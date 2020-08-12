@@ -56,5 +56,38 @@ namespace Ravi.DurableFunctions.HelloWorld
             var bitRates = bitRatesFromConfig.Split(",").Select(i => int.Parse(i));
             return await Task.FromResult(bitRates);
         }
+
+        [FunctionName("CleanUp")]
+        public static async Task Cleanup(
+            [ActivityTrigger] FormatVideoRequest formatVideoRequest, ILogger logger)
+        {
+            logger.LogInformation($"Cleaning up resources for file {formatVideoRequest.Location}");
+            await Task.Delay(1000);
+        }
+
+       
+        [FunctionName("SendApprovalRequestEmail")]
+        public static async Task SendApprovalEmail(
+            [ActivityTrigger] FormatVideoRequest formatVideoRequest, ILogger logger)
+        {
+            logger.LogInformation($"Sending email for approval. File: {formatVideoRequest.Location}");
+            await Task.Delay(1000);
+        }
+
+        [FunctionName("PublishVideo")]
+        public static async Task PublishVideoToCloud(
+            [ActivityTrigger] FormatVideoRequest formatVideoRequest, ILogger logger)
+        {
+            logger.LogInformation($"Publishing video file [{formatVideoRequest.Location}] to cloud");
+            await Task.Delay(1000);
+        }
+
+        [FunctionName("RejectVideo")]
+        public static async Task DeleteVideoFile(
+            [ActivityTrigger] FormatVideoRequest formatVideoRequest, ILogger logger)
+        {
+            logger.LogInformation($"Rejecting and deleting file {formatVideoRequest.Location}");
+            await Task.Delay(1000);
+        }
     }
 }
